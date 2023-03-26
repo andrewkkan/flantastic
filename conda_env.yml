@@ -1,4 +1,4 @@
-name: multitask-learning-hf
+name: flantastic
 channels:
   - defaults
 dependencies:
