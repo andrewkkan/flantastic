@@ -28,8 +28,7 @@ Outstanding issues:
 - Create an internal class structure for _helper_align_features output.
 - Urgent: Be able to handle datasets with missing splits.  Two errors are observed:
     - With tb.download_and_prepare(), the error occurs in _force_align_features when handling all splits.
-    - With tb.download_and_prepare(split='train'), the error occurs in the following line in the method ds_dataset:
-        dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]
+    - With tb.download_and_prepare(split='train'), the error occurs in _force_align_features
 """
 
 class IllegalArgumentError(ValueError):
@@ -49,6 +48,24 @@ class flantastic_mixture:
         elif not all([isinstance(cmpnt['ratio'], float) for cmpnt in mixture_list]):
             return IllegalArgumentError('mixture_list must contain only float in "ratio" key')
         self._mixture = mixture_list
+        splits = []
+        try:
+            for cmpnt in mixture_list:
+                splits.extend([*cmpnt['builder'].info.splits.keys()])
+        except:
+            splits = ['']
+        splits = set(splits)
+        self.builder_list_per_split, self.feature_list_per_split = {}, {}
+        for sp in splits:
+            for cmpnt in mixture_list:
+                if sp in cmpnt['builder'].info.splits:
+                    if sp in self.builder_list_per_split:
+                        self.builder_list_per_split[sp].append(cmpnt['builder'])
+                        self.feature_list_per_split[sp].append(cmpnt['builder'].info.features)
+                    else:
+                        self.builder_list_per_split[sp] = [cmpnt['builder']]
+                        self.feature_list_per_split[sp] = [cmpnt['builder'].info.features]
+
     def __iter__(self):
         return iter(self._mixture)
     def __len__(self):
@@ -73,44 +90,59 @@ class flantastic_mixture:
         return [cmpnt['builder'] for cmpnt in self.__iter__()]
     def configs(self) -> List[datasets.BuilderConfig]:
         return [cmpnt['builder'].config for cmpnt in self.__iter__()]
-
-def _helper_align_features(features_list: List[Features]) -> Tuple[str, Union[int, str, str, Dict[str, FeatureType]]]:
+    def feature_list_per_split(self) -> Dict[str, List[Features]]:
+        return self.feature_list_per_split
+    def builder_list_per_split(self) -> Dict[str, List[datasets.DatasetBuilder]]:
+        return self.builder_list_per_split
+    
+def _helper_align_features(features: Union[List[Features], Dict[str, List[Features]]]) -> Tuple[str, Union[int, str, str, Dict[str, FeatureType]]]:
     """ The main misalignment type happens with ClassLabel, where it can be ClassLabel(names=['entailment', 'not_entailment'])
     in one dataset and ClassLabel(names=['False', 'True']) in another dataset, as an example, with both defined for feature "label". 
     """
+    if isinstance(features, list):
+        splits = ['']
+    elif isinstance(features, dict):
+        splits = list(features.keys())
     name2feature, name2type = {}, {}
-    for fidx, features in enumerate(features_list):
-        for fname, ftype in features.items():
-            fvalue = ftype.__class__.__name__
-            if isinstance(ftype, Value):
-                fvalue = "__".join([fvalue, 
-                    str(ftype.dtype),
-                ])
-            elif isinstance(ftype, ClassLabel):
-                fvalue = "__".join([fvalue, 
-                    str(ftype.names),
-                ])
-            if fname in name2feature:
-                if fvalue in name2feature[fname]:
-                    name2feature[fname][fvalue].append(fidx)
+    for sp in splits:
+        features_list = features[sp] if isinstance(features, dict) else features
+        for fidx, fts in enumerate(features_list):
+            for fname, ftype in fts.items():
+                fvalue = ftype.__class__.__name__
+                if isinstance(ftype, Value):
+                    fvalue = "__".join([fvalue, 
+                        str(ftype.dtype),
+                    ])
+                elif isinstance(ftype, ClassLabel):
+                    fvalue = "__".join([fvalue, 
+                        str(ftype.names),
+                    ])
+                if fname in name2feature:
+                    if fvalue in name2feature[fname]:
+                        name2feature[fname][fvalue].append((sp, fidx))
+                    else:
+                        name2feature[fname][fvalue] = [(sp, fidx)]
+                    name2type[fname].append(ftype)
                 else:
-                    name2feature[fname][fvalue] = [fidx]
-                name2type[fname].append(ftype)
-            else:
-                name2feature[fname] = {fvalue: [fidx]}
-                name2type[fname] = [ftype]
+                    name2feature[fname] = {fvalue: [(sp, fidx)]}
+                    name2type[fname] = [ftype]
     for fname, fdict in name2feature.items():
+        fidx_iter = itertools.chain(*fdict.values())
         if len(fdict) > 1:
             new_fname = fname + DEFAULT_LABEL_FEATURE_REPLACEMENT
             logger.warning(f"Feature {fname} has different types in the datasets.  We will rename the feature to {new_fname} in the datasets.")
-            fidx_iter = itertools.chain(*fdict.values())
-            for fidx in fidx_iter:
-                if isinstance(features_list[fidx][fname], ClassLabel):
-                    yield 'ClassLabel', fidx, new_fname, fname, name2type[fname].pop()
+            for sp, fidx in fidx_iter:
+                if isinstance(features[sp][fidx][fname], ClassLabel):
+                    yield 'ClassLabel', fidx, new_fname, fname, name2type[fname].pop(), sp
                 else:
-                    yield 'Else', fidx, new_fname, fname, name2type[fname].pop()
+                    yield 'Else', fidx, new_fname, fname, name2type[fname].pop(), sp
         else:
-            yield 'Pass', "", "", fname, name2type[fname][0]
+            fidx = next(fidx_iter)
+            yield 'Pass', "", "", fname, name2type[fname][0], sp
+
+def _normalize_ratios(nums: List[float]) -> List[float]:
+    s = sum(nums)
+    return [num/s for num in nums]
 
 """
 Reminders:
@@ -144,8 +176,8 @@ def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, da
 
         @_generic_wraps
         def __init__(self, *args, **kwargs):
-            self.feature_list = [builder.info.features for builder in self.__BUILDER_MIXTURE__.builders()] # Watch out for those datasets with missing splits.
-            self.features_aligned_itr = list(_helper_align_features(self.feature_list))
+            self.feature_list_per_split = self.__BUILDER_MIXTURE__.feature_list_per_split
+            self.features_aligned_itr = list(_helper_align_features(self.feature_list_per_split))
             aligned_features = Features()
             for iter_obj in self.features_aligned_itr:
                 if 'ClassLabel' in iter_obj[0] or 'Else' in iter_obj[0]:
@@ -155,6 +187,7 @@ def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, da
             if not hasattr(self, 'info'):
                 self.info = datasets.DatasetInfo()
             self.info.features = aligned_features
+            self.seed = 42
             cls.__init___original__(self, *args, features=aligned_features, **kwargs, )
 
         @_generic_wraps
@@ -227,36 +260,44 @@ def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, da
             """ Modified from original datasets.DatasetBuilder.as_dataset to accomodate mixture.
                 Used by load_dataset.
             """
-            dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]
-            ratios = [cmpnt["ratio"] for cmpnt in self.__BUILDER_MIXTURE__]
-            def _force_align_features(dataset_list):
+            if 'split' in kwargs:
+                dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__ if kwargs['split'] in cmpnt["builder"].info.splits]
+            else:
+                dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]
+            def _force_align_features(dataset_list, split=None):
+                if not split:
+                    split = ''
                 for iter_obj in self.features_aligned_itr:
-                    if 'Else' in iter_obj[0] or 'ClassLabel' in iter_obj[0]:
-                        if 'ClassLabel' in iter_obj[0]:
-                            mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: self.feature_list[iter_obj[1]][iter_obj[3]].names[x[iter_obj[3]]]}, remove_columns=[iter_obj[3]])
-                        elif 'Else' in iter_obj[0]:
-                            mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: str(x[iter_obj[3]])}, remove_columns=[iter_obj[3]])
-                        dataset_list[iter_obj[1]] = mapped_dataset
+                    if split in iter_obj[5]:
+                        if 'Else' in iter_obj[0] or 'ClassLabel' in iter_obj[0]:
+                            if 'ClassLabel' in iter_obj[0]:
+                                mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: self.feature_list_per_split[split][iter_obj[1]][iter_obj[3]].names[x[iter_obj[3]]]}, remove_columns=[iter_obj[3]])
+                            elif 'Else' in iter_obj[0]:
+                                mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: str(x[iter_obj[3]])}, remove_columns=[iter_obj[3]])
+                            dataset_list[iter_obj[1]] = mapped_dataset
                 return dataset_list
             if isinstance(dataset_list[0], DatasetDict):
                 all_splits = list(set().union(*dataset_list))
                 # For now, just do sampling on all splits.
                 combined_dataset = DatasetDict({
                     split: interleave_datasets(
-                        datasets=_force_align_features([datasetdict[split] for datasetdict in dataset_list if split in datasetdict.keys()]), 
-                        probabilities=ratios, 
+                        datasets=_force_align_features([datasetdict[split] for datasetdict in dataset_list if split in datasetdict.keys()], split), 
+                        probabilities=_normalize_ratios([self.NAME_RATIOS[builder.info.config_name] for builder in self.__BUILDER_MIXTURE__.builder_list_per_split[split]]), 
                         seed=self.seed, 
                         stopping_strategy='all_exhausted'
                     ) for split in all_splits
                 })
             else:
+                if 'split' in kwargs:
+                    split = kwargs['split']
+                else:
+                    split = ['']
                 combined_dataset = interleave_datasets(
-                    datasets=_force_align_features(dataset_list), 
-                    probabilities=ratios, 
+                    datasets=_force_align_features(dataset_list, split), 
+                    probabilities=_normalize_ratios([self.NAME_RATIOS[builder.info.config_name] for builder in self.__BUILDER_MIXTURE__.builder_list_per_split[split]]), 
                     seed=self.seed, 
                     stopping_strategy='all_exhausted'
                 )
-            self.info.features = combined_dataset.features 
             return combined_dataset
         
         @_generic_wraps

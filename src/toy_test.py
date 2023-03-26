@@ -1,6 +1,6 @@
 import datasets
 from datasets import load_dataset_builder
-from super_glue import flantastic
+import flantastic
 from IPython import embed
 
 def test():
@@ -15,6 +15,10 @@ def test():
 
     tb = TestBuilder()
     tb.download_and_prepare()
-    ds = tb.as_dataset(split='train')
-    embed()
+    ds, ds_train, ds_test = tb.as_dataset(), tb.as_dataset(split='train'), tb.as_dataset(split='test')
+    # embed()
+
+if __name__ == '__main__':
+    test()
+
 
