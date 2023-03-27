@@ -22,15 +22,6 @@ DEFAULT_LABEL_FEATURE_REPLACEMENT = '_string'
 _DEFAULT_DESCRIPTION = ''
 _DEFAULT_CITATION = ''
 
-
-"""
-Outstanding issues:
-- Create an internal class structure for _helper_align_features output.
-- Urgent: Be able to handle datasets with missing splits.  Two errors are observed:
-    - With tb.download_and_prepare(), the error occurs in _force_align_features when handling all splits.
-    - With tb.download_and_prepare(split='train'), the error occurs in _force_align_features
-"""
-
 class IllegalArgumentError(ValueError):
     pass
 class MissingArgumentError(ValueError):
@@ -94,8 +85,17 @@ class flantastic_mixture:
         return self.feature_list_per_split
     def builder_list_per_split(self) -> Dict[str, List[datasets.DatasetBuilder]]:
         return self.builder_list_per_split
-    
-def _helper_align_features(features: Union[List[Features], Dict[str, List[Features]]]) -> Tuple[str, Union[int, str, str, Dict[str, FeatureType]]]:
+
+@dataclass
+class _Feature_Alignment_Ouput:
+    misalignment: str = "Pass" # "ClassLabel", "Else", "Pass"
+    split: str = "" # "", "train", "validation", "test", etc.
+    feature_idx_per_split: int = 0 # Each split has its own contigous feature indices 
+    feature_name_new: str = "idx" # "label", "label_string", "idx", etc.
+    feature_name_orig: str = "idx"
+    feature_type_orig: FeatureType = Value(dtype='string') # Value(dtype='string'), ClassLabel(names=['False', 'True']), etc.
+
+def _helper_align_features(features: Union[List[Features], Dict[str, List[Features]]]) -> _Feature_Alignment_Ouput:
     """ The main misalignment type happens with ClassLabel, where it can be ClassLabel(names=['entailment', 'not_entailment'])
     in one dataset and ClassLabel(names=['False', 'True']) in another dataset, as an example, with both defined for feature "label". 
     """
@@ -133,12 +133,33 @@ def _helper_align_features(features: Union[List[Features], Dict[str, List[Featur
             logger.warning(f"Feature {fname} has different types in the datasets.  We will rename the feature to {new_fname} in the datasets.")
             for sp, fidx in fidx_iter:
                 if isinstance(features[sp][fidx][fname], ClassLabel):
-                    yield 'ClassLabel', fidx, new_fname, fname, name2type[fname].pop(), sp
+                    yield _Feature_Alignment_Ouput(
+                        misalignment="ClassLabel",
+                        split=sp,
+                        feature_idx_per_split=fidx,
+                        feature_name_new=new_fname,
+                        feature_name_orig=fname,
+                        feature_type_orig=name2type[fname].pop(),
+                    )
                 else:
-                    yield 'Else', fidx, new_fname, fname, name2type[fname].pop(), sp
+                    yield _Feature_Alignment_Ouput(
+                        misalignment="Else",
+                        split=sp,
+                        feature_idx_per_split=fidx,
+                        feature_name_new=new_fname,
+                        feature_name_orig=fname,
+                        feature_type_orig=name2type[fname].pop(),
+                    )
         else:
             fidx = next(fidx_iter)
-            yield 'Pass', "", "", fname, name2type[fname][0], sp
+            yield _Feature_Alignment_Ouput(
+                misalignment="Pass",
+                split="",
+                feature_idx_per_split=0,
+                feature_name_new="",
+                feature_name_orig=fname,
+                feature_type_orig=name2type[fname][0],
+            )
 
 def _normalize_ratios(nums: List[float]) -> List[float]:
     s = sum(nums)
@@ -177,13 +198,13 @@ def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, da
         @_generic_wraps
         def __init__(self, *args, **kwargs):
             self.feature_list_per_split = self.__BUILDER_MIXTURE__.feature_list_per_split
-            self.features_aligned_itr = list(_helper_align_features(self.feature_list_per_split))
+            self.features_aligned_itr: List[_Feature_Alignment_Ouput] = list(_helper_align_features(self.feature_list_per_split))
             aligned_features = Features()
-            for iter_obj in self.features_aligned_itr:
-                if 'ClassLabel' in iter_obj[0] or 'Else' in iter_obj[0]:
-                    aligned_features.update({iter_obj[2]: Value(dtype='string')})
-                elif 'Pass' in iter_obj[0]:
-                    aligned_features.update({iter_obj[3]: iter_obj[4]})
+            for fao in self.features_aligned_itr:
+                if 'ClassLabel' in fao.misalignment or 'Else' in fao.misalignment:
+                    aligned_features.update({fao.feature_name_new: Value(dtype='string')})
+                elif 'Pass' in fao.misalignment:
+                    aligned_features.update({fao.feature_name_orig: fao.feature_type_orig})
             if not hasattr(self, 'info'):
                 self.info = datasets.DatasetInfo()
             self.info.features = aligned_features
@@ -267,14 +288,14 @@ def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, da
             def _force_align_features(dataset_list, split=None):
                 if not split:
                     split = ''
-                for iter_obj in self.features_aligned_itr:
-                    if split in iter_obj[5]:
-                        if 'Else' in iter_obj[0] or 'ClassLabel' in iter_obj[0]:
-                            if 'ClassLabel' in iter_obj[0]:
-                                mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: self.feature_list_per_split[split][iter_obj[1]][iter_obj[3]].names[x[iter_obj[3]]]}, remove_columns=[iter_obj[3]])
+                for fao in self.features_aligned_itr:
+                    if split in fao.split:
+                        if 'Else' in fao.misalignment or 'ClassLabel' in fao.misalignment:
+                            if 'ClassLabel' in fao.misalignment:
+                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: self.feature_list_per_split[split][fao.feature_idx_per_split][fao.feature_name_orig].names[x[fao.feature_name_orig]]}, remove_columns=[fao.feature_name_orig])
                             elif 'Else' in iter_obj[0]:
-                                mapped_dataset = dataset_list[iter_obj[1]].map(lambda x: {iter_obj[2]: str(x[iter_obj[3]])}, remove_columns=[iter_obj[3]])
-                            dataset_list[iter_obj[1]] = mapped_dataset
+                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: str(x[fao.feature_name_orig])}, remove_columns=[fao.feature_name_orig])
+                            dataset_list[fao.feature_idx_per_split] = mapped_dataset
                 return dataset_list
             if isinstance(dataset_list[0], DatasetDict):
                 all_splits = list(set().union(*dataset_list))

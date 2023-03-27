@@ -16,7 +16,7 @@ def test():
     tb = TestBuilder()
     tb.download_and_prepare()
     ds, ds_train, ds_test = tb.as_dataset(), tb.as_dataset(split='train'), tb.as_dataset(split='test')
-    # embed()
+    embed()
 
 if __name__ == '__main__':
     test()
