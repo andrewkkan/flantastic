@@ -2,7 +2,7 @@ import datasets
 from dataclasses import dataclass
 import functools
 import itertools
-from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable
+from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable, Iterator
 from datasets.utils import logging
 from datasets.combine import interleave_datasets
 from datasets import Dataset, DatasetDict, DatasetInfo, IterableDataset
@@ -95,7 +95,7 @@ class _Feature_Alignment_Ouput:
     feature_name_orig: str = "idx"
     feature_type_orig: FeatureType = Value(dtype='string') # Value(dtype='string'), ClassLabel(names=['False', 'True']), etc.
 
-def _helper_align_features(features: Union[List[Features], Dict[str, List[Features]]]) -> _Feature_Alignment_Ouput:
+def _helper_align_features(features: Union[List[Features], Dict[str, List[Features]]]) -> Iterator[_Feature_Alignment_Ouput]:
     """ The main misalignment type happens with ClassLabel, where it can be ClassLabel(names=['entailment', 'not_entailment'])
     in one dataset and ClassLabel(names=['False', 'True']) in another dataset, as an example, with both defined for feature "label". 
     """
