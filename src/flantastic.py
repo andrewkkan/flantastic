@@ -2,11 +2,13 @@ import datasets
 from dataclasses import dataclass
 import functools
 import itertools
-from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable, Iterator
+import re
+from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable, Iterator, Literal
 from datasets.utils import logging
 from datasets.combine import interleave_datasets
 from datasets import Dataset, DatasetDict, DatasetInfo, IterableDataset
 from datasets.features.features import FeatureType, Features, Value, ClassLabel
+from promptsource.templates import DatasetTemplates, Template
 
 logger = logging.get_logger(__name__)
 
@@ -14,7 +16,7 @@ DatasetType = TypeVar("DatasetType", Dataset, IterableDataset)
 
 __all__ = [
             'flantastic',
-            'flantastic_mixture',
+            'Flantastic_Mixture',
            ]
 
 ORIGINAL_METHOD_SUFFIX = '_original__'
@@ -27,17 +29,30 @@ class IllegalArgumentError(ValueError):
 class MissingArgumentError(ValueError):
     pass
 
-class flantastic_mixture:
-    def __init__(self, mixture_list: List[Dict[str, Union[float, datasets.DatasetBuilder]]]) -> None:
-        # A clumsy way to check mixture_list.
-        if  not isinstance(mixture_list, list):
-            return IllegalArgumentError('mixture_list must be a list')
+class Flantastic_Mixture:
+    def __init__(
+        self, 
+        mixture_list: List[
+            Dict[str, Union[
+                float,                          # 'ratio'
+                datasets.DatasetBuilder,        # 'builder'
+                List[                           # 'templates'
+                    Dict[str, Union[
+                        str,                    # 'template_name', 'input_feature_name', 'output_feature_name'
+                        Literal[True, False]    # 'remove_applied_features'
+                    ]]
+                ]
+            ]]
+        ]
+    ) -> None:
+        if not isinstance(mixture_list, list):
+            raise IllegalArgumentError('mixture_list must be a list')
         elif all('builder' not in cmpnt.keys() or 'ratio' not in cmpnt.keys() for cmpnt in mixture_list):
-            return IllegalArgumentError('mixture_list must be a list of dict with keys "builder" and "ratio"')
+            raise IllegalArgumentError('mixture_list must be a list of dict with keys "builder" and "ratio"')
         elif not all([isinstance(cmpnt['builder'], datasets.DatasetBuilder) for cmpnt in mixture_list]):
-            return IllegalArgumentError('mixture_list must contain only DatasetBuilder instances in "builder" key')
+            raise IllegalArgumentError('mixture_list must contain only DatasetBuilder instances in "builder" key')
         elif not all([isinstance(cmpnt['ratio'], float) for cmpnt in mixture_list]):
-            return IllegalArgumentError('mixture_list must contain only float in "ratio" key')
+            raise IllegalArgumentError('mixture_list must contain only float in "ratio" key')
         self._mixture = mixture_list
         splits = []
         try:
@@ -85,6 +100,28 @@ class flantastic_mixture:
         return self.feature_list_per_split
     def builder_list_per_split(self) -> Dict[str, List[datasets.DatasetBuilder]]:
         return self.builder_list_per_split
+    def templates(self) -> Dict[str, List[Dict[str, Union[str, Literal[True, False], List[Template]]]]]:
+        templates_dict = {}
+        for cmpnt in self.__iter__():
+            template_list = []
+            for template_dict in cmpnt['templates']:
+                split_prompt_name = template_dict['template_name'].split('/')
+                if len(split_prompt_name) == 2:
+                    dataset_name, template_name = split_prompt_name
+                    template: Template = DatasetTemplates(dataset_name)[template_name]
+                elif len(split_prompt_name) == 3:
+                    dataset_name, subset_name, template_name = split_prompt_name
+                    template: Template = DatasetTemplates(f"{dataset_name}/{subset_name}")[template_name]
+                else:
+                    raise IllegalArgumentError("Prompt name must be of the form 'dataset_name/template_name' or 'dataset_name/subset_name/template_name' in this current version of Flantastic_Mixture.")
+                template_list.append({
+                    'template': template,
+                    'input_feature_name': template_dict['input_feature_name'],
+                    'output_feature_name': template_dict['output_feature_name'],
+                    'remove_applied_features': template_dict['remove_applied_features']
+                })
+            templates_dict[cmpnt['builder'].info.config_name] = template_list    
+        return templates_dict
 
 @dataclass
 class _Feature_Alignment_Ouput:
@@ -172,19 +209,19 @@ Reminders:
     'boolq' can be obtained by builder_instance.info.config_name.  'super_glue' can be obtained by builder_instance.name or builder_instance.info.builder_name.
     builder_instance.info.name does not work.
 """
-def flantastic(mixture: Union[flantastic_mixture, List[Dict[str, Union[float, datasets.DatasetBuilder]]]]=None) -> Callable:
+def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
 
     if mixture is None:
         return MissingArgumentError('mixture is required')
     elif isinstance(mixture, list):
-        mixture = flantastic_mixture(mixture_list=mixture)
-    elif not isinstance(mixture, flantastic_mixture):
-        return IllegalArgumentError('mixture must be a list of dict or flantastic_mixture') 
+        mixture = Flantastic_Mixture(mixture_list=mixture)
+    elif not isinstance(mixture, Flantastic_Mixture):
+        return IllegalArgumentError('mixture must be a list of dict or Flantastic_Mixture') 
 
     def class_decorator(cls: datasets.DatasetBuilder=None) -> Callable:
         if cls is None:
             return MissingArgumentError('cls is required')
-        cls.__BUILDER_MIXTURE__: flantastic_mixture = mixture
+        cls.__BUILDER_MIXTURE__: Flantastic_Mixture = mixture
 
         def _generic_wraps(new_fn):
             original_fn = getattr(cls, new_fn.__name__)

@@ -21,7 +21,7 @@ import json
 import os
 
 import datasets
-
+from flantastic import flantastic, flantastic_mixture, flantastic_prompts
 
 _SUPER_GLUE_CITATION = """\
 @article{wang2019superglue,
