@@ -32,6 +32,7 @@ DatasetType = TypeVar("DatasetType", Dataset, IterableDataset)
 __all__ = [
             'flantastic',
             'Flantastic_Mixture',
+            'Flantastic_Template',
            ]
 
 ORIGINAL_METHOD_SUFFIX = '_original__'
