@@ -16,11 +16,13 @@ from dataclasses import dataclass
 import functools
 import itertools
 import re
+import warnings
+from tqdm import tqdm
 from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable, Iterator, Literal
 from datasets.utils import logging
 from datasets.combine import interleave_datasets, concatenate_datasets
 from datasets import Dataset, DatasetDict, DatasetInfo, IterableDataset
-from datasets.features.features import FeatureType, Features, Value, ClassLabel
+from datasets.features.features import FeatureType, Features, Value, ClassLabel, _check_if_features_can_be_aligned
 from promptsource.templates import DatasetTemplates, Template
 
 logger = logging.get_logger(__name__)
@@ -36,12 +38,51 @@ ORIGINAL_METHOD_SUFFIX = '_original__'
 DEFAULT_LABEL_FEATURE_REPLACEMENT = '_string'
 _DEFAULT_DESCRIPTION = ''
 _DEFAULT_CITATION = ''
+_DEFAULT_INPUT_FEATURE_NAME = 'INPUT'
+_DEFAULT_OUTPUT_FEATURE_NAME = 'OUTPUT'
 
 class IllegalArgumentError(ValueError):
     pass
 class MissingArgumentError(ValueError):
     pass
 
+@dataclass
+class Flantastic_Template:
+    template: Template
+    input_feature_name: str = _DEFAULT_INPUT_FEATURE_NAME
+    output_feature_name: str = _DEFAULT_OUTPUT_FEATURE_NAME
+
+    def apply(self, dataset: Union[Dataset, DatasetDict], columns_to_remove: List[str]=None) -> Union[Dataset, DatasetDict]:
+        def _apply_template(x):
+            input_result, output_result = [], []
+            features = list(x.keys())
+            for idx, _ in enumerate(x[features[0]]):
+                example = {features[0]: x[features[0]][idx]}
+                for ft in features[1:]:
+                    example.update({ft: x[ft][idx]})
+                result = self.template.apply(example)
+                input_result.append(result[0])
+                output_result.append(result[1])
+            return {
+                self.input_feature_name: input_result,
+                self.output_feature_name: output_result,
+            }
+        dataset_with_prompt = dataset.map(_apply_template, batched=True, remove_columns=columns_to_remove)
+        return dataset_with_prompt
+    
+    def eval(self, features: Features) -> Tuple[Features, Literal[True, False]]:
+        modified_features = Features({
+            self.input_feature_name: Value(dtype='string'),
+            self.output_feature_name: Value(dtype='string'),
+        })
+        template_keywords = " ".join(re.findall(r'\{\{.+\}\}', self.template.jinja))
+        alignment_required = False
+        for fname, ftype in features.items():
+            if fname not in template_keywords:
+                modified_features[fname] = ftype
+                alignment_required = True
+        return modified_features, alignment_required
+    
 class Flantastic_Mixture:
     def __init__(
         self, 
@@ -74,16 +115,40 @@ class Flantastic_Mixture:
         except:
             splits = ['']
         splits = set(splits)
-        self.builder_list_per_split, self.feature_list_per_split = {}, {}
+        self.builder_list_per_split = {}
         for sp in splits:
             for cmpnt in mixture_list:
                 if sp in cmpnt['builder'].info.splits:
                     if sp in self.builder_list_per_split:
                         self.builder_list_per_split[sp].append(cmpnt['builder'])
-                        self.feature_list_per_split[sp].append(cmpnt['builder'].info.features)
                     else:
                         self.builder_list_per_split[sp] = [cmpnt['builder']]
-                        self.feature_list_per_split[sp] = [cmpnt['builder'].info.features]
+        # Check for config names of each component.
+        builderconfig_default_name = datasets.BuilderConfig().name
+        for cmpnt in mixture_list:
+            if cmpnt["builder"].info.config_name == builderconfig_default_name:
+                cmpnt["builder"].info.config_name = cmpnt["builder"].name
+                cmpnt["builder"]._save_info()
+        self.templates_dict = {}
+        for cmpnt in mixture_list:
+            template_list = []
+            if cmpnt["templates"]:
+                if not isinstance(cmpnt["templates"], list):
+                    raise IllegalArgumentError('Templates must be a list of strings in the form "dataset_name/template_name" or "dataset_name/subset_name/template_name".')
+                for tname in cmpnt["templates"]:
+                    if not isinstance(tname, str):
+                        raise IllegalArgumentError('Templates must be a list of strings in the form "dataset_name/template_name" or "dataset_name/subset_name/template_name".')
+                    split_prompt_name = tname.split("/")
+                    if len(split_prompt_name) == 2:
+                        dataset_name, template_name = split_prompt_name
+                        template: Template = DatasetTemplates(dataset_name)[template_name]
+                    elif len(split_prompt_name) == 3:
+                        dataset_name, subset_name, template_name = split_prompt_name
+                        template: Template = DatasetTemplates(f"{dataset_name}/{subset_name}")[template_name]
+                    else:
+                        raise IllegalArgumentError("Prompt name must be of the form 'dataset_name/template_name' or 'dataset_name/subset_name/template_name' in this current version of Flantastic_Mixture.")
+                    template_list.append(Flantastic_Template(template=template))
+            self.templates_dict[cmpnt['builder'].info.config_name] = template_list    
 
     def __iter__(self):
         return iter(self._mixture)
@@ -109,33 +174,6 @@ class Flantastic_Mixture:
         return [cmpnt['builder'] for cmpnt in self.__iter__()]
     def configs(self) -> List[datasets.BuilderConfig]:
         return [cmpnt['builder'].config for cmpnt in self.__iter__()]
-    def feature_list_per_split(self) -> Dict[str, List[Features]]:
-        return self.feature_list_per_split
-    def builder_list_per_split(self) -> Dict[str, List[datasets.DatasetBuilder]]:
-        return self.builder_list_per_split
-    def templates(self) -> Dict[str, List[Dict[str, Union[str, Literal[True, False], List[Template]]]]]:
-        templates_dict = {}
-        for cmpnt in self.__iter__():
-            template_list = []
-            if cmpnt["templates"]:
-                for template_dict in cmpnt['templates']:
-                    split_prompt_name = template_dict['template_name'].split('/')
-                    if len(split_prompt_name) == 2:
-                        dataset_name, template_name = split_prompt_name
-                        template: Template = DatasetTemplates(dataset_name)[template_name]
-                    elif len(split_prompt_name) == 3:
-                        dataset_name, subset_name, template_name = split_prompt_name
-                        template: Template = DatasetTemplates(f"{dataset_name}/{subset_name}")[template_name]
-                    else:
-                        raise IllegalArgumentError("Prompt name must be of the form 'dataset_name/template_name' or 'dataset_name/subset_name/template_name' in this current version of Flantastic_Mixture.")
-                    template_list.append({
-                        'template': template,
-                        'input_feature_name': template_dict['input_feature_name'],
-                        'output_feature_name': template_dict['output_feature_name'],
-                        'remove_applied_features': template_dict['remove_applied_features']
-                    })
-            templates_dict[cmpnt['builder'].info.config_name] = template_list    
-        return templates_dict
 
 @dataclass
 class _Feature_Alignment_Ouput:
@@ -212,6 +250,29 @@ def _helper_align_features(features: Union[List[Features], Dict[str, List[Featur
                 feature_type_orig=name2type[fname][0],
             )
 
+def _modify_feature_list_by_template(
+    builder_list_per_split: Dict[str, List[datasets.DatasetBuilder]], 
+    templates_dict: Dict[str, List[Flantastic_Template]],
+) -> Dict[str, List[Features]]:
+    """ 
+    This function modifies the feature list of each dataset in the mixture, based on the templates_dict.  
+    The input builder_list_per_split is a dict of lists of builders, where the key is the split name and the value is the list of builders.
+    The input templates_dict is a dict of lists of templates, where the key is the config_name of the builder and the value is the list of templates.
+    The output is a dict of lists of features, where the key is the split name and the value is the list of features.
+    """
+    features_dict = {}
+    for sp, builder_list in builder_list_per_split.items():
+        features_list = []
+        for builder in builder_list:
+            if sp not in builder.info.splits:
+                continue
+            features = builder.info.features
+            for template in templates_dict[builder.info.config_name]:
+                modified_features, _ = template.eval(features)
+                features_list.append(modified_features)
+        features_dict[sp] = features_list
+    return features_dict
+
 def _normalize_ratios(nums: List[float]) -> List[float]:
     s = sum(nums)
     return [num/s for num in nums]
@@ -248,8 +309,8 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
 
         @_generic_wraps
         def __init__(self, *args, **kwargs):
-            self.feature_list_per_split = self.__BUILDER_MIXTURE__.feature_list_per_split
-            self.features_aligned_itr: List[_Feature_Alignment_Ouput] = list(_helper_align_features(self.feature_list_per_split))
+            self.modified_feature_list_per_split = _modify_feature_list_by_template(self.__BUILDER_MIXTURE__.builder_list_per_split, self.__BUILDER_MIXTURE__.templates_dict)
+            self.features_aligned_itr: List[_Feature_Alignment_Ouput] = list(_helper_align_features(self.modified_feature_list_per_split))
             aligned_features = Features()
             for fao in self.features_aligned_itr:
                 if 'ClassLabel' in fao.misalignment or 'Else' in fao.misalignment:
@@ -334,17 +395,6 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                 Flantastic for IterableDataset has not been implemented or tested.  See documentation https://huggingface.co/docs/datasets/about_mapstyle_vs_iterable.
                 Support of IterableDataset will be top priority in future flantastic releases.
             """
-            # 1. Apply templates before feature alignment.  
-            #    Some templates with original features set to remove may have feature alignment done automatically.
-            # 2. Need Flantastic_Template and override apply method for Dataset.  
-            #    Current Template.apply method from promptsource does not do what we want.
-            #    Flantastic_Template needs to encapsulate the following:
-            #    {
-            #     'template': template,
-            #     'input_feature_name': template_dict['input_feature_name'],
-            #     'output_feature_name': template_dict['output_feature_name'],
-            #     'remove_applied_features': template_dict['remove_applied_features']
-            #     }          
             #### Dont forget to resolve the corner case where split = ''.  When does that ever happen??
             def _force_align_features(dataset_list: List[Dataset], split=None) -> List[Dataset]:
                 if not split:
@@ -353,29 +403,39 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                     if split in fao.split:
                         if 'Else' in fao.misalignment or 'ClassLabel' in fao.misalignment:
                             if 'ClassLabel' in fao.misalignment:
-                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: self.feature_list_per_split[split][fao.feature_idx_per_split][fao.feature_name_orig].names[x[fao.feature_name_orig]]}, remove_columns=[fao.feature_name_orig])
+                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: self.modified_feature_list_per_split[split][fao.feature_idx_per_split][fao.feature_name_orig].names[x[fao.feature_name_orig]]}, remove_columns=[fao.feature_name_orig])
                             elif 'Else' in fao.misalignment:
                                 mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: str(x[fao.feature_name_orig])}, remove_columns=[fao.feature_name_orig])
                             dataset_list[fao.feature_idx_per_split] = mapped_dataset
                 return dataset_list
+
+            dataset_list = []
+            for cmpnt in self.__BUILDER_MIXTURE__:
+                dataset = cmpnt["builder"].as_dataset(*args, **kwargs)
+                template_list = self.__BUILDER_MIXTURE__.templates_dict[cmpnt["builder"].info.config_name]
+                if template_list:
+                    dataset_with_prompts = []
+                    for template in template_list:
+                        fnames = cmpnt["builder"].info.features.keys() # Original feature names
+                        template_keywords = " ".join(re.findall(r"\{\{(.+)\}\}", template.template.jinja))
+                        columns_to_remove = [fname for fname in fnames if fname in template_keywords]
+                        dataset_with_prompts.append(
+                            template.apply(dataset, columns_to_remove=columns_to_remove), 
+                        )
+                    if isinstance(dataset, DatasetDict):
+                        dataset_dict = DatasetDict()
+                        for split in dataset.keys():
+                            dataset_dict.update({
+                                split: concatenate_datasets([ddict[split] for ddict in dataset_with_prompts])
+                            })
+                        dataset_list.append(dataset_dict)
+                    else:
+                        dataset_list.append(concatenate_datasets(dataset_with_prompts))
+                else:
+                    dataset_list.append(dataset)
+
             if 'split' in kwargs:
                 # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__ if kwargs['split'] in cmpnt["builder"].info.splits]
-                """Assumed we're operating with Dataset
-                """
-                dataset_list = []
-                for cmpnt in self.__BUILDER_MIXTURE__:
-                    dataset = cmpnt["builder"].as_dataset(*args, **kwargs)
-                    if kwargs['split'] in cmpnt["builder"].info.splits:
-                        template_list = self.__BUILDER_MIXTURE__.templates()[cmpnt.info.config_name]
-                        if template_list:
-                            dataset_with_prompts = []
-                            for template in template_list:
-                                dataset_with_prompts.append(
-                                    template.apply(dataset)
-                                )
-                            dataset_list.append(concatenate_datasets(dataset_with_prompts))
-                        else:
-                            dataset_list.append(dataset)
                 split = kwargs['split']
                 combined_dataset = interleave_datasets(
                     datasets=_force_align_features(dataset_list, split), 
@@ -384,28 +444,7 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                     stopping_strategy='all_exhausted'
                 )
             else:
-                # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]
-                """Assumed we're operating with DatasetDict
-                """
-                dataset_list = []
-                for cmpnt in self.__BUILDER_MIXTURE__:
-                    dataset = cmpnt["builder"].as_dataset(*args, **kwargs)
-                    template_list = self.__BUILDER_MIXTURE__.templates()[cmpnt.info.config_name]
-                    if template_list:
-                        dataset_dict = DatasetDict()
-                        for split in dataset.keys():
-                            dataset_split = dataset[split]
-                            dataset_with_prompts = []
-                            for template in template_list:
-                                dataset_with_prompts.append(
-                                    template.apply(dataset_split)
-                                )
-                            dataset_dict.update(
-                                split: concatenate_datasets(dataset_with_prompts)
-                            )
-                        dataset_list.append(dataset_dict)
-                    else:
-                        dataset_list.append(dataset)                      
+                # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]             
                 all_splits = list(set().union(*dataset_list))
                 combined_dataset = DatasetDict({
                     split: interleave_datasets(
@@ -427,7 +466,6 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                 lock_path = self._output_dir + "_infos.lock"
             with FileLock(lock_path) if is_local else contextlib.nullcontext():
                 DatasetInfosDict(**{self.config.name: self.info}).write_to_directory(self.get_imported_module_dir())
-
             return cls._safe_infos_original__(self, *args, **kwargs)
         
         @_generic_wraps
