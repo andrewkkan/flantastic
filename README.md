@@ -51,6 +51,24 @@ tb.download_and_prepare()
 ds = tb.as_dataset()
 ```
 
+This results in a dataset with the following structure:
+```
+DatasetDict({
+    train: Dataset({
+        features: ['INPUT', 'OUTPUT'],
+        num_rows: 875331
+    })
+    test: Dataset({
+        features: ['INPUT', 'OUTPUT'],
+        num_rows: 30235
+    })
+    validation: Dataset({
+        features: ['INPUT', 'OUTPUT'],
+        num_rows: 21140
+    })
+})
+```
+
 ### Install depedencies
 ```bash
 git clone https://github.com/andrewkkan/flantastic.git
