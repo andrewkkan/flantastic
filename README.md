@@ -2,12 +2,11 @@
 Mixture of datasets intended for multi-task training, by combining pre-packaged or custom packaged datasets with prompt templates into a single dataset.
 
 ## Objective
-
 Inspired by [Google's SeqIO](https://github.com/google/seqio), and [Google's FLAN usage of SeqIO](https://github.com/google-research/FLAN/tree/main/flan/v2).
 Idea adapted for [HF Transformers training pipeline](https://github.com/huggingface/transformers/tree/main/src/transformers).
 
 ### Usage
-
+Below is an example of how to use the `flantastic` decorator to create a mixture of datasets.
 ```
     fm = Flantastic_Mixture(
         mixture_list=[
@@ -52,9 +51,7 @@ Idea adapted for [HF Transformers training pipeline](https://github.com/huggingf
 git clone https://github.com/andrewkkan/flantastic.git
 pip install -r requirements.txt
 ```
-### Run training
-```python TBD
-```
+
 
 
 
