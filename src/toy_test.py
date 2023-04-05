@@ -1,13 +1,8 @@
 import datasets
 from datasets import load_dataset_builder
 from flantastic import flantastic, Flantastic_Mixture
-from IPython import embed
 
 def test():
-
-                    # 'input_feature_name': 'INPUT',
-                    # 'output_feature_name': 'OUTPUT',
-                    # 'remove_applied_features': True,
 
     fm = Flantastic_Mixture(
         mixture_list=[
@@ -27,6 +22,14 @@ def test():
                     'ag_news/which_section',
                 ],
             },
+            {
+                'builder': load_dataset_builder("squad"),
+                'ratio': 0.5,
+                'templates': [
+                    'squad/given_context_generate_question',
+                    'squad/jeopardy',
+                ],
+            },
         ],
     )
 
@@ -36,8 +39,9 @@ def test():
 
     tb = TestBuilder()
     tb.download_and_prepare()
-    ds, ds_train, ds_test = tb.as_dataset(), tb.as_dataset(split='train'), tb.as_dataset(split='test')
-    embed()
+    ds, ds_train = tb.as_dataset(), tb.as_dataset(split='train')
+    print(ds)
+    print(ds_train[0:10])
 
 if __name__ == '__main__':
     test()

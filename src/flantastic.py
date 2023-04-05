@@ -71,18 +71,11 @@ class Flantastic_Template:
         dataset_with_prompt = dataset.map(_apply_template, batched=True, remove_columns=columns_to_remove)
         return dataset_with_prompt
     
-    def eval(self, features: Features) -> Tuple[Features, Literal[True, False]]:
-        modified_features = Features({
+    def eval(self, features: Features) -> Tuple[Features]:
+        return Features({
             self.input_feature_name: Value(dtype='string'),
             self.output_feature_name: Value(dtype='string'),
         })
-        template_keywords = " ".join(re.findall(r'\{\{.+\}\}', self.template.jinja))
-        alignment_required = False
-        for fname, ftype in features.items():
-            if fname not in template_keywords:
-                modified_features[fname] = ftype
-                alignment_required = True
-        return modified_features, alignment_required
     
 class Flantastic_Mixture:
     def __init__(
@@ -268,9 +261,10 @@ def _modify_feature_list_by_template(
             if sp not in builder.info.splits:
                 continue
             features = builder.info.features
-            for template in templates_dict[builder.info.config_name]:
-                modified_features, _ = template.eval(features)
-                features_list.append(modified_features)
+            if templates_dict and templates_dict[builder.info.config_name]:
+                for template in templates_dict[builder.info.config_name]:
+                    modified_features = template.eval(features)
+                    features_list.append(modified_features)
         features_dict[sp] = features_list
     return features_dict
 
@@ -327,59 +321,53 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
         @_generic_wraps
         def _create_builder_config(
             self, 
-            name=None, 
+            config_name=None, 
             custom_features=None, 
             **config_kwargs,
         ) -> Tuple[datasets.BuilderConfig, str]:
             """Modified from original datasets.DatasetBuilder._create_builder_config to accomodate mixture.
             """
-            if name is not None or len(self.__BUILDER_MIXTURE__) == 1:
-                # Let original method handle the single case, where either it is implicitly specified by having only 1 config, or when it is explicitly specified by a name.
-                if not self.BUILDER_CONFIGS:
-                    self.BUILDER_CONFIGS: List[datasets.BuilderConfig] = self.__BUILDER_MIXTURE__.configs()
-                return cls._create_builder_config_original__(self, name=name, custom_features=custom_features, **config_kwargs)
+            """Original annotation: Create and validate BuilderConfig object as well as a unique config id for this config.
+            Raises ValueError if there are multiple builder configs and name and DEFAULT_CONFIG_NAME are None.
+            config_kwargs override the defaults kwargs in config
+            """
+            self.BUILDER_CONFIGS: List[datasets.BuilderConfig] = self.__BUILDER_MIXTURE__.configs() # Deprecate BUILDER_CONFIGS and rebuild it based on given mixture, in case it is needed by legacy code.
+            self.NAME_RATIOS: Dict[str, float] = self.__BUILDER_MIXTURE__.ratios()
+            builder_config = self.BUILDER_CONFIG_CLASS()
+            if hasattr(self, "name"):
+                setattr(builder_config, "name", getattr(self, "name"))
+            if hasattr(self, "VERSION"):
+                setattr(builder_config, "version", getattr(self, "VERSION"))
+            setattr(builder_config, "description", "Flantastic mixture for datasets " + ", ".join(self.__BUILDER_MIXTURE__.config_names()))
+            if config_kwargs:
+                # builder_config = copy.deepcopy(builder_config) # This is not needed, since we are not modifying the original builder_config from config_dict, i.e. we never called self.builder_configs.get(name).
+                for key, value in config_kwargs.items():
+                    if value is not None:
+                        if not hasattr(builder_config, key):
+                            raise ValueError(f"BuilderConfig {builder_config} doesn't have a '{key}' key.")
+                        setattr(builder_config, key, value)
+                config_kwargs.update(builder_config.__dict__) # config_kwargs still takes precedence, but whatever it doesn't have, we get from builder_config.
             else:
-                """Original annotation: Create and validate BuilderConfig object as well as a unique config id for this config.
-                Raises ValueError if there are multiple builder configs and name and DEFAULT_CONFIG_NAME are None.
-                config_kwargs override the defaults kwargs in config
-                """
-                self.BUILDER_CONFIGS: List[datasets.BuilderConfig] = self.__BUILDER_MIXTURE__.configs() # Deprecate BUILDER_CONFIGS and rebuild it based on given mixture, in case it is needed by legacy code.
-                self.NAME_RATIOS: Dict[str, float] = self.__BUILDER_MIXTURE__.ratios()
-                builder_config = self.BUILDER_CONFIG_CLASS()
-                if hasattr(self, "name"):
-                    setattr(builder_config, "name", getattr(self, "name"))
-                if hasattr(self, "VERSION"):
-                    setattr(builder_config, "version", getattr(self, "VERSION"))
-                setattr(builder_config, "description", "Flantastic mixture for datasets " + ", ".join(self.__BUILDER_MIXTURE__.config_names()))
-                if config_kwargs:
-                    # builder_config = copy.deepcopy(builder_config) # This is not needed, since we are not modifying the original builder_config from config_dict, i.e. we never called self.builder_configs.get(name).
-                    for key, value in config_kwargs.items():
-                        if value is not None:
-                            if not hasattr(builder_config, key):
-                                raise ValueError(f"BuilderConfig {builder_config} doesn't have a '{key}' key.")
-                            setattr(builder_config, key, value)
-                    config_kwargs.update(builder_config.__dict__) # config_kwargs still takes precedence, but whatever it doesn't have, we get from builder_config.
-                else:
-                    config_kwargs = builder_config.__dict__
-                # compute the config id that is going to be used for caching
-                config_id = builder_config.create_config_id(config_kwargs, custom_features=custom_features)
-                is_custom = (config_id not in self.builder_configs) and config_id != "default"
-                if is_custom:
-                    logger.info(f"Using custom data configuration {config_id}")
-                else:
-                    if (
-                        builder_config.name in self.builder_configs
-                        and builder_config != self.builder_configs[builder_config.name]
-                    ):
-                        raise ValueError(
-                            "Cannot name a custom BuilderConfig the same as an available "
-                            f"BuilderConfig. Change the name. Available BuilderConfigs: {list(self.builder_configs.keys())}"
-                        )
-                    if not builder_config.version:
-                        raise ValueError(f"BuilderConfig {builder_config.name} must have a version")
-                    # if not builder_config.description:
-                    #     raise ValueError(f"BuilderConfig {builder_config.name} must have a description"  )
-                return builder_config, config_id
+                config_kwargs = builder_config.__dict__
+            # compute the config id that is going to be used for caching
+            config_id = builder_config.create_config_id(config_kwargs, custom_features=custom_features)
+            is_custom = (config_id not in self.builder_configs) and config_id != "default"
+            if is_custom:
+                logger.info(f"Using custom data configuration {config_id}")
+            else:
+                if (
+                    builder_config.name in self.builder_configs
+                    and builder_config != self.builder_configs[builder_config.name]
+                ):
+                    raise ValueError(
+                        "Cannot name a custom BuilderConfig the same as an available "
+                        f"BuilderConfig. Change the name. Available BuilderConfigs: {list(self.builder_configs.keys())}"
+                    )
+                if not builder_config.version:
+                    raise ValueError(f"BuilderConfig {builder_config.name} must have a version")
+                # if not builder_config.description:
+                #     raise ValueError(f"BuilderConfig {builder_config.name} must have a description"  )
+            return builder_config, config_id
 
         @_generic_wraps
         def download_and_prepare(self, *args, **kwargs) -> None:
@@ -418,8 +406,8 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                     dataset_with_prompts = []
                     for template in template_list:
                         fnames = cmpnt["builder"].info.features.keys() # Original feature names
-                        template_keywords = " ".join(re.findall(r"\{\{(.+)\}\}", template.template.jinja))
-                        columns_to_remove = [fname for fname in fnames if fname in template_keywords]
+                        # template_keywords = " ".join(re.findall(r"\{\{(.+)\}\}", template.template.jinja))
+                        columns_to_remove = fnames # [fname for fname in fnames if fname in template_keywords]
                         dataset_with_prompts.append(
                             template.apply(dataset, columns_to_remove=columns_to_remove), 
                         )
@@ -482,9 +470,13 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
         
         @_generic_wraps
         def _split_generators(self, *args, **kwargs) -> DatasetInfo:
-            """Override this.
-            """
-            return [datasets.SplitGenerator(name=datasets.Split.TRAIN, gen_kwargs={})]
+            """Not implemented, as long as each of the components of the mixture has its own split_generators."""
+            pass
+        
+        @_generic_wraps
+        def _generate_examples(self, *args, **kwargs):
+            """Not implemented, as long as each of the components of the mixture has its own _generate_examples."""
+            pass
 
         return cls
     return class_decorator
