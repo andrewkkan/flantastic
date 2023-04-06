@@ -1,7 +1,5 @@
 transformers==4.10.3
 datasets==1.9.0
-numpy<1.20
-pandas==1.4.4
 promptsource==0.2.3
 
 # Output of pip install -r requirements.txt: 
