@@ -1,9 +1,5 @@
-accelerate==0.3.0
 transformers==4.10.3
-nlp==0.4.0
 datasets==1.9.0
-seqio==0.0.5
-nltk>=3.6.2
 numpy<1.20
 pandas==1.4.4
 promptsource==0.2.3
