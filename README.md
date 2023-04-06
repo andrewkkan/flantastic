@@ -74,6 +74,7 @@ DatasetDict({
 git clone https://github.com/andrewkkan/flantastic.git
 pip install -r requirements.txt
 ```
+Python version: '<3.10,>=3.7' to satisfy promptsource dependency.
 
 
 

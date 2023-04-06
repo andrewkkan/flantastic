@@ -122,7 +122,6 @@ class Flantastic_Mixture:
         for cmpnt in mixture_list:
             if cmpnt["builder"].info.config_name == builderconfig_default_name:
                 cmpnt["builder"].info.config_name = cmpnt["builder"].name
-                cmpnt["builder"]._save_info()
         self.templates_dict = {}
         for cmpnt in mixture_list:
             template_list = []
