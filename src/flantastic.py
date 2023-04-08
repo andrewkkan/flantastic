@@ -20,6 +20,7 @@ import warnings
 from tqdm import tqdm
 from typing import Dict, List, Union, Optional, TypeVar, Tuple, Callable, Iterator, Literal
 from datasets.utils import logging
+from datasets.utils.info_utils import VerificationMode
 from datasets.combine import interleave_datasets, concatenate_datasets
 from datasets import Dataset, DatasetDict, DatasetInfo, IterableDataset
 from datasets.features.features import FeatureType, Features, Value, ClassLabel, _check_if_features_can_be_aligned
@@ -108,9 +109,9 @@ class Flantastic_Mixture:
                 splits.extend([*cmpnt['builder'].info.splits.keys()])
         except:
             splits = ['']
-        splits = set(splits)
+        self.splits = set(splits)
         self.builder_list_per_split = {}
-        for sp in splits:
+        for sp in self.splits:
             for cmpnt in mixture_list:
                 if sp in cmpnt['builder'].info.splits:
                     if sp in self.builder_list_per_split:
@@ -291,14 +292,21 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
         if cls is None:
             return MissingArgumentError('cls is required')
         cls.__BUILDER_MIXTURE__: Flantastic_Mixture = mixture
+        cls.__NAME__: str = cls.__name__
+        cls.__VERSION__: str = "0.0.0"
 
         def _generic_wraps(new_fn):
-            original_fn = getattr(cls, new_fn.__name__)
-            @functools.wraps(original_fn)
-            def wrap(self, *args, **kwargs):
-                return new_fn(self, *args, **kwargs)
+            try:
+                original_fn = getattr(cls, new_fn.__name__)
+            except AttributeError:
+                def wrap(self, *args, **kwargs):
+                    return new_fn(self, *args, **kwargs)
+            else:
+                setattr(cls, original_fn.__name__ + ORIGINAL_METHOD_SUFFIX, original_fn)
+                @functools.wraps(original_fn)
+                def wrap(self, *args, **kwargs):
+                    return new_fn(self, *args, **kwargs)
             setattr(cls, new_fn.__name__, wrap)
-            setattr(cls, original_fn.__name__ + ORIGINAL_METHOD_SUFFIX, original_fn)
             return wrap
 
         @_generic_wraps
@@ -316,6 +324,11 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
             self.info.features = aligned_features
             self.seed = 42
             cls.__init___original__(self, *args, features=aligned_features, **kwargs, )
+            if not self.info.splits:
+                if 'split' in kwargs:
+                    self.info.splits = datasets.SplitDict({kwargs['split']: datasets.SplitInfo(name=kwargs['split'])})
+                else:
+                    self.info.splits = datasets.SplitDict({splitname: datasets.SplitInfo(name=splitname) for splitname in self.__BUILDER_MIXTURE__.splits})
 
         @_generic_wraps
         def _create_builder_config(
@@ -334,10 +347,11 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
             self.NAME_RATIOS: Dict[str, float] = self.__BUILDER_MIXTURE__.ratios()
             builder_config = self.BUILDER_CONFIG_CLASS()
             if hasattr(self, "name"):
-                setattr(builder_config, "name", getattr(self, "name"))
-            if hasattr(self, "VERSION"):
-                setattr(builder_config, "version", getattr(self, "VERSION"))
+                setattr(builder_config, "name", getattr(self, "__NAME__"))
+            if hasattr(self, "version"):
+                setattr(builder_config, "version", getattr(self, "__VERSION__"))
             setattr(builder_config, "description", "Flantastic mixture for datasets " + ", ".join(self.__BUILDER_MIXTURE__.config_names()))
+            setattr(builder_config, "mixture_seed", str(self.__BUILDER_MIXTURE__.ratios())+str(self.seed)) # This is intended to pass a unique signature to create_config_id, so that the config_id is unique for each mixture.
             if config_kwargs:
                 # builder_config = copy.deepcopy(builder_config) # This is not needed, since we are not modifying the original builder_config from config_dict, i.e. we never called self.builder_configs.get(name).
                 for key, value in config_kwargs.items():
@@ -375,74 +389,7 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
             """
             for cmpnt in self.__BUILDER_MIXTURE__:
                 cmpnt["builder"].download_and_prepare(*args, **kwargs)
-
-        @_generic_wraps
-        def as_dataset(self, *args, **kwargs) -> Union[Dataset, DatasetDict]:
-            """ Modified from original datasets.DatasetBuilder.as_dataset to accomodate mixture.
-                Used by load_dataset.
-                Flantastic for IterableDataset has not been implemented or tested.  See documentation https://huggingface.co/docs/datasets/about_mapstyle_vs_iterable.
-                Support of IterableDataset will be top priority in future flantastic releases.
-            """
-            #### Dont forget to resolve the corner case where split = ''.  When does that ever happen??
-            def _force_align_features(dataset_list: List[Dataset], split=None) -> List[Dataset]:
-                if not split:
-                    split = ''
-                for fao in self.features_aligned_itr:
-                    if split in fao.split:
-                        if 'Else' in fao.misalignment or 'ClassLabel' in fao.misalignment:
-                            if 'ClassLabel' in fao.misalignment:
-                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: self.modified_feature_list_per_split[split][fao.feature_idx_per_split][fao.feature_name_orig].names[x[fao.feature_name_orig]]}, remove_columns=[fao.feature_name_orig])
-                            elif 'Else' in fao.misalignment:
-                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: str(x[fao.feature_name_orig])}, remove_columns=[fao.feature_name_orig])
-                            dataset_list[fao.feature_idx_per_split] = mapped_dataset
-                return dataset_list
-
-            dataset_list = []
-            for cmpnt in self.__BUILDER_MIXTURE__:
-                dataset = cmpnt["builder"].as_dataset(*args, **kwargs)
-                template_list = self.__BUILDER_MIXTURE__.templates_dict[cmpnt["builder"].info.config_name]
-                if template_list:
-                    dataset_with_prompts = []
-                    for template in template_list:
-                        fnames = cmpnt["builder"].info.features.keys() # Original feature names
-                        # template_keywords = " ".join(re.findall(r"\{\{(.+)\}\}", template.template.jinja))
-                        columns_to_remove = fnames # [fname for fname in fnames if fname in template_keywords]
-                        dataset_with_prompts.append(
-                            template.apply(dataset, columns_to_remove=columns_to_remove), 
-                        )
-                    if isinstance(dataset, DatasetDict):
-                        dataset_dict = DatasetDict()
-                        for split in dataset.keys():
-                            dataset_dict.update({
-                                split: concatenate_datasets([ddict[split] for ddict in dataset_with_prompts])
-                            })
-                        dataset_list.append(dataset_dict)
-                    else:
-                        dataset_list.append(concatenate_datasets(dataset_with_prompts))
-                else:
-                    dataset_list.append(dataset)
-
-            if 'split' in kwargs:
-                # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__ if kwargs['split'] in cmpnt["builder"].info.splits]
-                split = kwargs['split']
-                combined_dataset = interleave_datasets(
-                    datasets=_force_align_features(dataset_list, split), 
-                    probabilities=_normalize_ratios([self.NAME_RATIOS[builder.info.config_name] for builder in self.__BUILDER_MIXTURE__.builder_list_per_split[split]]), 
-                    seed=self.seed, 
-                    stopping_strategy='all_exhausted'
-                )
-            else:
-                # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]             
-                all_splits = list(set().union(*dataset_list))
-                combined_dataset = DatasetDict({
-                    split: interleave_datasets(
-                        datasets=_force_align_features([datasetdict[split] for datasetdict in dataset_list if split in datasetdict.keys()], split), 
-                        probabilities=_normalize_ratios([self.NAME_RATIOS[builder.info.config_name] for builder in self.__BUILDER_MIXTURE__.builder_list_per_split[split]]), 
-                        seed=self.seed, 
-                        stopping_strategy='all_exhausted'
-                    ) for split in all_splits
-                })
-            return combined_dataset
+            cls.download_and_prepare_original__(self, *args, verification_mode = VerificationMode.NO_CHECKS, **kwargs)
         
         @_generic_wraps
         def _save_infos(self, *args, **kwargs) -> DatasetInfo:
@@ -466,16 +413,79 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
                 # homepage=self.config.url,
                 # citation=self.config.citation + "\n" + _DEFAULT_CITATION,
             )
+
+        @_generic_wraps
+        def _flantastic_magic(self):
+            def _force_align_features(dataset_list: List[Dataset], split=None) -> List[Dataset]:
+                if not split:
+                    split = ''
+                for fao in self.features_aligned_itr:
+                    if split in fao.split:
+                        if 'Else' in fao.misalignment or 'ClassLabel' in fao.misalignment:
+                            if 'ClassLabel' in fao.misalignment:
+                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: self.modified_feature_list_per_split[split][fao.feature_idx_per_split][fao.feature_name_orig].names[x[fao.feature_name_orig]]}, remove_columns=[fao.feature_name_orig])
+                            elif 'Else' in fao.misalignment:
+                                mapped_dataset = dataset_list[fao.feature_idx_per_split].map(lambda x: {fao.feature_name_new: str(x[fao.feature_name_orig])}, remove_columns=[fao.feature_name_orig])
+                            dataset_list[fao.feature_idx_per_split] = mapped_dataset
+                return dataset_list
+
+            dataset_list = []
+            for cmpnt in self.__BUILDER_MIXTURE__:
+                dataset = cmpnt["builder"].as_dataset()
+                template_list = self.__BUILDER_MIXTURE__.templates_dict[cmpnt["builder"].info.config_name]
+                if template_list:
+                    dataset_with_prompts = []
+                    for template in template_list:
+                        fnames = cmpnt["builder"].info.features.keys() # Original feature names
+                        # template_keywords = " ".join(re.findall(r"\{\{(.+)\}\}", template.template.jinja))
+                        columns_to_remove = fnames # [fname for fname in fnames if fname in template_keywords]
+                        dataset_with_prompts.append(
+                            template.apply(dataset, columns_to_remove=columns_to_remove), 
+                        )
+                    if isinstance(dataset, DatasetDict):
+                        dataset_dict = DatasetDict()
+                        for split in dataset.keys():
+                            dataset_dict.update({
+                                split: concatenate_datasets([ddict[split] for ddict in dataset_with_prompts])
+                            })
+                        dataset_list.append(dataset_dict)
+                    else:
+                        dataset_list.append(concatenate_datasets(dataset_with_prompts))
+                else:
+                    dataset_list.append(dataset)
+
+            # dataset_list = [cmpnt["builder"].as_dataset(*args, **kwargs) for cmpnt in self.__BUILDER_MIXTURE__]             
+            all_splits = list(set().union(*dataset_list))
+            self.combined_dataset = DatasetDict({
+                split: interleave_datasets(
+                    datasets=_force_align_features([datasetdict[split] for datasetdict in dataset_list if split in datasetdict.keys()], split), 
+                    probabilities=_normalize_ratios([self.NAME_RATIOS[builder.info.config_name] for builder in self.__BUILDER_MIXTURE__.builder_list_per_split[split]]), 
+                    seed=self.seed, 
+                    stopping_strategy='all_exhausted'
+                ) for split in all_splits
+            })
+
+        @_generic_wraps
+        def _split_generators(self, *args, **kwargs):
+            try: 
+                self.combined_dataset
+            except:
+                self._flantastic_magic()
+            generator_list = []
+            for split in self.__BUILDER_MIXTURE__.splits:
+                generator_list.append(
+                    datasets.SplitGenerator(
+                        name=split,
+                        gen_kwargs={'dataset': self.combined_dataset[split]},
+                    )
+                )
+            return generator_list
         
         @_generic_wraps
-        def _split_generators(self, *args, **kwargs) -> DatasetInfo:
-            """Not implemented, as long as each of the components of the mixture has its own split_generators."""
-            pass
-        
-        @_generic_wraps
-        def _generate_examples(self, *args, **kwargs):
-            """Not implemented, as long as each of the components of the mixture has its own _generate_examples."""
-            pass
+        def _generate_examples(self, dataset):
+            # For non Seq2Seq tasks, the features need to be modified from "INPUT" and "OUTPUT", to "text" and "label" for example.
+            for id_, row in enumerate(dataset):
+                yield id_, {"INPUT": row['INPUT'], "OUTPUT": row['OUTPUT']}
 
         return cls
     return class_decorator

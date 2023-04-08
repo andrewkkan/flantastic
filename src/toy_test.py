@@ -16,7 +16,7 @@ def test():
             },
             {
                 'builder': load_dataset_builder("ag_news"),
-                'ratio': 1.0,
+                'ratio': 0.75,
                 'templates': [
                     'ag_news/classify',
                     'ag_news/which_section',
@@ -39,9 +39,9 @@ def test():
 
     tb = TestBuilder()
     tb.download_and_prepare()
-    ds, ds_train = tb.as_dataset(), tb.as_dataset(split='train')
+    ds = tb.as_dataset(split=None) # split=None is the default, for all splits separately. split='all' is for all splits combined.
     print(ds)
-    print(ds_train[0:10])
+    # print(ds_train[0:10])
 
 if __name__ == '__main__':
     test()
