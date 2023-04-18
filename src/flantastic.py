@@ -389,6 +389,7 @@ def flantastic(mixture: Flantastic_Mixture=None) -> Callable:
             """
             for cmpnt in self.__BUILDER_MIXTURE__:
                 cmpnt["builder"].download_and_prepare(*args, **kwargs)
+            # The original download_and_prepare will call _split_generators and _generate_examples when a previously cached copy is not found.
             cls.download_and_prepare_original__(self, *args, verification_mode = VerificationMode.NO_CHECKS, **kwargs)
         
         @_generic_wraps
