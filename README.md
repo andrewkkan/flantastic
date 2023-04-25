@@ -69,10 +69,9 @@ DatasetDict({
 })
 ```
 
-### Install depedencies
+### Installation
 ```bash
-git clone https://github.com/andrewkkan/flantastic.git
-pip install -r requirements.txt
+pip install git+https://github.com/andrewkkan/flantastic
 ```
 Python version: '<3.10,>=3.7' to satisfy promptsource dependency.
 
